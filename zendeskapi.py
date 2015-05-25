@@ -13,7 +13,7 @@ from zendesk import Zendesk, get_id_from_url
 from inspect import currentframe
 import collections
 
-log.basicConfig(level=log.DEBUG, filename='/var/log/zabbix/zendesk.log', 
+log.basicConfig(level=log.DEBUG, filename='/var/log/zabbix-server/zendesk.log', 
 	format='%(asctime)s %(levelname)s %(message)s')
 
 def lino(): return currentframe().f_back.f_lineno
@@ -26,8 +26,10 @@ class z2z:
 		self.zabbix_conf = '/etc/zabbix/zabbix_server.conf'
 		try:
 			# Input data mangling
+			log.debug("ARG 1: " + argv[1])
+			log.debug("ARG 2: " + argv[2])
+			log.debug("ARG 3: " + argv[3])
 			self.ydata = yaml.load(argv[3])
-			log.debug(argv[3])
 			event_id = argv[2].split(':')[0]
 			event_status = argv[2].split(':')[1].strip()
 			log.debug('event_id:%s, event_status:%s' % (event_id,event_status))
@@ -53,11 +55,10 @@ class z2z:
 
 	
 	def create_zendesk_ticket(self,event_id,event_status):
-		collaborators = self.zbx_evt_recipients(event_id)	
+		collaborators = self.zbx_evt_recipients(event_id)
 		subject = self.ydata['trigger']['name']
-		#description = '%s\n\nZabbix severity: %s' % (self.ydata['desc'],self.ydata['trigger']['severity'])
-		description = self.ydata['desc'].replace('"','')
-		priority = 'high' if self.ydata['trigger']['severity'] == 'High' else 'normal'
+		description = self.ydata['desc'].replace('"','"')
+                priority = 'urgent' if self.ydata['trigger']['severity'] == 'Disaster' or self.ydata['trigger']['severity'] == 'High' else 'normal'
 		tkt_data = { 'ticket': {
 			'subject': subject,
 			'description': description,
@@ -87,14 +88,17 @@ class z2z:
 	def update_zendesk_ticket(self,event_id,event_status):
 		if event_status == 'OK':
 			tkt = self.zd.list_all_tickets(external_id=event_id)
-			log.debug(tkt) # json.dumps(tkt,sort_keys=True,indent=2)
 			if tkt['count']==1:
 				tkt_id = tkt['tickets'][0]['id']
-				desc = self.ydata['desc'].replace('"','')
+				desc = self.ydata['desc'].replace('"','"')
 				#log.info('Update ticket %s' % tkt_id)
-				if self.ydata['trigger']['severity'] == 'High':
+				if self.ydata['trigger']['severity'] == 'High' or self.ydata['trigger']['severity'] == 'Disaster':
 					tkt_data = {'ticket':{
-						'comment':{'public':True, 'body': desc}
+						'status': 'open',
+						'comment': {
+							'public': True,
+							'body': '%s\n(Auto-updated by Vabbix)'%desc
+						}
 					}}
 					log.info('Updating ticket %s from Zabbix event %s' % (tkt_id,event_id))
 				else:
@@ -102,7 +106,7 @@ class z2z:
 						'status': 'solved',
 						'assignee_id': self.zd_user['id'],
 						'comment':{
-							'public':True, 
+							'public': True, 
 							'author_id': self.zd_enduser['id'],
 							'body': '%s\n(Auto-closed by Zabbix)'%desc
 						}
@@ -119,9 +123,9 @@ class z2z:
 		try:
 			# Get MySQL connection parameters from zabbix conf file
 			with open(self.zabbix_conf) as f:
-				my = dict( ln.lower()[2:].split('=') for ln in
+				my = dict( ln[2:].split('=') for ln in
 					f.read().split('\n') if ln.startswith('DB') )
-			self.db = MySQLdb.connect(my['host'], my['user'], my['password'], my['name'])
+			self.db = MySQLdb.connect(my['Host'], my['User'], my['Password'], my['Name'])
 			self.mycsr = self.db.cursor()
 		except IOError as e:
 			log.error(e)
@@ -145,12 +149,12 @@ class z2z:
 			data = self.zd.search_user(query='email:%s'%email)['users'][0]
 			with open(cache_file, 'w') as f: 
 				f.write(yaml.dump(data) )
-		
 		return data
 			
 
 	def zbx_evt_recipients(self,event_id):
-		rows = ['test@example.com']
+		# This will return EMPTY unless you sepcify users to hosts
+		rows = ['devops@vardot.com']
 		try:
 			sql = """SELECT m.sendto mail
 FROM events e,functions f,items i, hosts_groups hg, groups g, users_groups uxg, usrgrp ug, media m
@@ -165,7 +169,7 @@ AND m.userid=uxg.userid
 AND LOWER(g.name)=LOWER(ug.name) 
 AND hg.groupid=g.groupid;"""
 			self.mycsr.execute(sql % event_id)
-			rows.extend([ r[0] for r in self.mycsr.fetchall() ])
+			#rows.extend([ r[0] for r in self.mycsr.fetchall() ])
 			return rows
 		except:
 			return rows
